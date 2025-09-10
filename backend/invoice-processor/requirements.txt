@@ -1,0 +1,7 @@
+google-cloud-functions
+google-cloud-storage
+google-cloud-vision
+google-cloud-documentai
+google-cloud-aiplatform # Dùng cho Gemini API
+Flask
+gunicorn 
