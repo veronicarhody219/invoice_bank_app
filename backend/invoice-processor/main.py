@@ -1,26 +1,52 @@
+import re
 import os
 import json
 from google.cloud import aiplatform
 from flask import Flask, request, jsonify
+import firebase_admin
+from firebase_admin import credentials, firestore
+from vertexai.preview.generative_models import GenerativeModel
+# Thêm thư viện Flask-CORS để xử lý CORS chuyên nghiệp hơn
+from flask_cors import CORS
+
+# Khởi tạo Firebase
+# Tự động tìm thông tin xác thực từ môi trường Google Cloud
+try:
+    cred = credentials.ApplicationDefault()
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+except Exception as e:
+    # Xử lý lỗi nếu không thể kết nối Firebase
+    print(f"Lỗi khi khởi tạo Firebase: {e}")
+    db = None
 
 # Khởi tạo ứng dụng Flask
 app = Flask(__name__)
+# Sử dụng Flask-CORS để xử lý CORS
+CORS(app)  # Áp dụng cho toàn bộ ứng dụng
 
 # Thiết lập location chung
-location = 'asia-southeast1'
+location = 'us-central1'
 
 
 def get_gemini_model():
     """Hàm helper để khởi tạo mô hình Gemini."""
-    project_id = os.environ.get('GOOGLE_CLOUD_PROJECT_ID')
-    if not project_id:
-        raise ValueError("GOOGLE_CLOUD_PROJECT_ID not set")
-    aiplatform.init(project=project_id, location=location)
-    return aiplatform.generative_models.GenerativeModel("gemini-pro")
+    try:
+        project_id = os.environ.get('GOOGLE_CLOUD_PROJECT_ID')
+        if not project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT_ID not set")
+
+        aiplatform.init(project=project_id, location=location)
+
+        # Trả về đối tượng mô hình GenerativeModel
+        return GenerativeModel("gemini-2.5-pro")
+
+    except Exception as e:
+        print(f"Error getting Gemini model: {e}")
+        return None
+
 
 # Định nghĩa route cho hàm xử lý hóa đơn
-
-
 @app.route('/process_invoice_text', methods=['POST'])
 def process_invoice_text():
     try:
@@ -30,6 +56,8 @@ def process_invoice_text():
 
         invoice_content = request_json['invoiceContent']
         model = get_gemini_model()
+        if model is None:
+            return jsonify({"error": "Failed to load Gemini model"}), 500
 
         prompt = f"""
         Phân tích đoạn văn bản hóa đơn GTGT sau đây.
@@ -50,19 +78,27 @@ def process_invoice_text():
         """
         response = model.generate_content(prompt)
         gemini_response_text = response.text.strip()
-        start_index = gemini_response_text.find('{')
-        end_index = gemini_response_text.rfind('}') + 1
-        json_string = gemini_response_text[start_index:end_index]
-        parsed_data = json.loads(json_string)
 
-        return jsonify(parsed_data)
+        # Use regex to find the JSON object and extract it
+        json_match = re.search(r'\{.*\}', gemini_response_text, re.DOTALL)
+        if json_match:
+            json_string = json_match.group(0)
+            parsed_data = json.loads(json_string)
+        else:
+            return jsonify({"error": "No valid JSON found in model response"}), 500
+
+        # Ghi dữ liệu đã xử lý vào Firestore
+        if db:
+            doc_ref = db.collection('invoices').document()
+            doc_ref.set(parsed_data)
+
+        return jsonify({"success": True, "docId": doc_ref.id})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # Định nghĩa route cho hàm xử lý sao kê
-
-
 @app.route('/process_bank_statement', methods=['POST'])
 def process_bank_statement():
     try:
@@ -72,6 +108,8 @@ def process_bank_statement():
 
         statement_content = request_json['statementContent']
         model = get_gemini_model()
+        if model is None:
+            return jsonify({"error": "Failed to load Gemini model"}), 500
 
         prompt = f"""
         Tôi có một đoạn văn bản sao kê ngân hàng. Hãy trích xuất các giao dịch và trả về dưới dạng một mảng JSON. Mỗi đối tượng trong mảng cần có các trường: `ngay`, `so_tien`, và `noi_dung`. `so_tien` sẽ là giá trị âm nếu là giao dịch ghi nợ và dương nếu là giao dịch ghi có. `ngay` phải được định dạng lại thành DD/MM/YYYY. Bỏ qua các dòng không phải là giao dịch như tiêu đề hoặc dòng tổng kết.
@@ -97,16 +135,21 @@ def process_bank_statement():
         """
         response = model.generate_content(prompt)
         gemini_response_text = response.text.strip()
-        start_index = gemini_response_text.find('[')
-        end_index = gemini_response_text.rfind(']') + 1
-        json_string = gemini_response_text[start_index:end_index]
-        parsed_data = json.loads(json_string)
 
-        return jsonify(parsed_data)
+        # Use regex to find the JSON array and extract it
+        json_match = re.search(r'\[.*\]', gemini_response_text, re.DOTALL)
+        if json_match:
+            json_string = json_match.group(0)
+            parsed_data = json.loads(json_string)
+        else:
+            return jsonify({"error": "No valid JSON found in model response"}), 500
+
+        # Ghi dữ liệu đã xử lý vào Firestore
+        if db:
+            doc_ref = db.collection('bank_transactions').document()
+            doc_ref.set({"transactions": parsed_data})
+
+        return jsonify({"success": True, "docId": doc_ref.id})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))

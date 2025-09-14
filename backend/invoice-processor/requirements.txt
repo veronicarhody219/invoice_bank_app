@@ -5,3 +5,5 @@ google-cloud-documentai
 google-cloud-aiplatform # Dùng cho Gemini API
 Flask
 gunicorn 
+firebase-admin
+flask-cors
